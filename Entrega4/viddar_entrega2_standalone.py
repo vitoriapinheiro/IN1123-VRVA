@@ -54,9 +54,11 @@ os.makedirs(PROJECT_DIR, exist_ok=True)
 os.makedirs(f'{PROJECT_DIR}/checkpoints', exist_ok=True)
 os.makedirs(f'{PROJECT_DIR}/data', exist_ok=True)
 
-# cache do Hugging Face dentro do Drive: os pesos do Grounding DINO (~700MB) só
-# baixam de verdade na primeira execução; nas próximas, o HF encontra em cache.
-os.environ['HF_HOME'] = f'{PROJECT_DIR}/hf_cache'
+# cache do Hugging Face no disco local do Colab, NÃO no Drive: o safetensors lê
+# os pesos via mmap e, no Drive, um arquivo parcialmente sincronizado quebra com
+# "SafetensorError: header too large". Re-baixar ~700MB localmente leva <1 min.
+shutil.rmtree(f'{PROJECT_DIR}/hf_cache', ignore_errors=True)
+os.environ['HF_HOME'] = '/content/hf_cache'
 os.makedirs(os.environ['HF_HOME'], exist_ok=True)
 
 # --- 0a. Repositórios + checkpoint do SAM (clone é rápido, mas o checkpoint é
@@ -78,8 +80,10 @@ else:
 os.makedirs('/content/SAMed/checkpoints', exist_ok=True)
 shutil.copy(SAM_CKPT_DRIVE, '/content/SAMed/checkpoints/sam_vit_b_01ec64.pth')
 
-sys.path.insert(0, '/content/segment-anything')
+# o SAMed tem sua própria cópia modificada de segment_anything; o repo original
+# precisa ficar NA FRENTE no sys.path até a seção 0i, que troca a ordem.
 sys.path.insert(0, '/content/SAMed')
+sys.path.insert(0, '/content/segment-anything')
 
 # --- 0b. Dataset ViDDAR, extraído DIRETO NO DRIVE (sobrevive a reconexões) ---
 EXTRACT_DIR = f'{PROJECT_DIR}/data/extracted'
@@ -253,6 +257,12 @@ dino_model = AutoModelForZeroShotObjectDetection.from_pretrained(dino_model_id).
 print("Grounding DINO carregado.")
 
 # --- 0g. SAM original + predictor ---
+# limpa qualquer segment_anything já importado (ex.: a cópia do SAMed, se esta
+# célula for re-rodada na mesma sessão) e garante o repo original na frente.
+for mod_name in list(sys.modules.keys()):
+    if mod_name == 'segment_anything' or mod_name.startswith('segment_anything.'):
+        del sys.modules[mod_name]
+sys.path.insert(0, '/content/segment-anything')
 from segment_anything import sam_model_registry as sam_model_registry_orig, SamPredictor, SamAutomaticMaskGenerator
 
 sam_baseline = sam_model_registry_orig['vit_b'](checkpoint='/content/SAMed/checkpoints/sam_vit_b_01ec64.pth')
