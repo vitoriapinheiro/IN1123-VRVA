@@ -1,0 +1,598 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{url}
+
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+\begin{document}
+
+% ============================================================
+% TITLE
+% ============================================================
+
+\title{How Much Guidance Is Needed for AR Obstruction Detection?\\
+A Replication and Preliminary Adaptation of ViDDAR}
+
+\author{
+\IEEEauthorblockN{Luís Eduardo}
+\IEEEauthorblockA{
+UFPE/CIn\\
+Recife, Brazil\\
+lema@cin.ufpe.br
+}
+\and
+\IEEEauthorblockN{Vitoria Pinheiro}
+\IEEEauthorblockA{
+UFPE/CIn\\
+Recife, Brazil\\
+vps3@cin.ufpe.br
+}
+}
+
+\maketitle
+
+% ============================================================
+% ABSTRACT
+% ============================================================
+
+\begin{abstract}
+Augmented Reality (AR) content can obscure physical objects that are relevant to a user's task. ViDDAR detects such obstruction with a three-stage pipeline: a vision-language model (VLM) names the key object, Grounding DINO localizes it, and the Segment Anything Model (SAM) segments it. We replicate this pipeline (69.41\% mIoU and 84.97\% obstruction accuracy, versus 71.85\% and 89.21\% in the original work) and ask how much guidance, semantic and spatial, is actually needed. We compare two adaptations of SAM ViT-B: a prompt-free variant with LoRA in the image encoder (Option A, SAMed-style) and a box-conditioned variant that fine-tunes only the mask decoder (Option B, MedSAM-style), whose boxes come from Grounding DINO prompted with the ground-truth object name. On a held-out test set of 61 images, Option A reaches 68.63\% IoU and Option B 88.55\% (paired difference $+19.9$ pp, 95\% CI $[+13.9,+25.9]$), 0.9 pp below SAM prompted with an oracle box; decoder fine-tuning adds only $+1.7$ pp over zero-shot SAM with the same box, a difference whose confidence interval includes zero. For obstruction detection, fixed thresholds yield 90--92\% accuracy for all key-mask sources, including ground truth, whereas thresholds tuned on validation give Option B 96.72\% accuracy with no false negatives and Option A 85.25\%. We also characterize run-to-run variance and failure cases. Results indicate that guidance from the object name, converted into a box, accounts for most of the segmentation quality.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Augmented Reality, AR security, obstruction detection, Segment Anything Model, LoRA, Grounding DINO, Vision-Language Models, image segmentation.
+\end{IEEEkeywords}
+
+
+% ============================================================
+% I. INTRODUCTION
+% ============================================================
+
+\section{Introduction}
+
+Augmented Reality (AR) systems combine information from the physical environment with virtual content presented directly within the user's view. Although this integration enables new forms of interaction, it also introduces specific risks: virtual elements may modify, obscure, or replace important information in the physical environment.
+
+A particularly relevant scenario occurs when augmented content obstructs physical objects required for task execution. Depending on the context, obscuring signs, controls, vehicles, electrical outlets, equipment, or other task-relevant objects may negatively affect user perception and safety.
+
+ViDDAR~\cite{viddar} addresses this problem by proposing a pipeline for detecting task-detrimental virtual content. For obstruction detection, the method combines a Vision-Language Model (VLM) to identify the task-relevant object, Grounding DINO~\cite{groundingdino} to localize it, and the Segment Anything Model (SAM)~\cite{sam} to obtain its segmentation mask. The resulting key-object mask is then compared with the region occupied by the AR content to determine whether significant obstruction occurs.
+
+Despite its reported performance, this architecture depends on multiple models and several forms of intermediate guidance: semantic identification of the relevant object, spatial localization, and segmentation. This motivates an additional question: how much of this guidance is actually required to perform AR obstruction detection?
+
+In this work, we first replicate the ViDDAR obstruction-detection pipeline using LLaVA-NeXT, Grounding DINO, and SAM. We then analyze, through diagnostic configurations, the influence of semantic and spatial guidance on key-object segmentation. Finally, we compare two adaptations of SAM that sit at opposite ends of a guidance spectrum: a prompt-free adaptation inspired by SAMed~\cite{samed}, which receives only the scene image (Option A), and a box-conditioned adaptation inspired by MedSAM~\cite{medsam}, which keeps the Grounding DINO box as a prompt and fine-tunes only the mask decoder (Option B). Both are evaluated for segmentation and for the final obstruction decision.
+
+Our contributions are: (i) a documented replication of ViDDAR with publicly available models; (ii) a controlled comparison of the two adaptation strategies under a fixed split; (iii) an analysis of run-to-run variance in prompt-free training; and (iv) an evaluation of how segmentation quality translates into obstruction-detection errors, with emphasis on false negatives.
+
+% ============================================================
+% II. OBJECTIVES AND RESEARCH QUESTIONS
+% ============================================================
+
+\section{Objectives and Research Questions}
+
+\subsection{General Objective}
+
+The general objective of this work is to experimentally replicate the ViDDAR obstruction-detection pipeline and investigate how much semantic and spatial guidance is required to identify relevant objects in AR scenes and detect their obstruction by virtual content.
+
+\subsection{Research Questions}
+
+The investigation is organized around the following research questions:
+
+\textbf{RQ1:} To what extent can the obstruction-detection results reported by ViDDAR be reproduced using publicly available models and computational resources?
+
+\textbf{RQ2:} What is the impact of semantic guidance on key-object localization and segmentation?
+
+\textbf{RQ3:} What is the impact of spatial guidance, particularly bounding-box information, on key-object segmentation quality?
+
+\textbf{RQ4:} Can SAM be adapted to directly identify and segment the key object from the complete scene image without explicitly providing an object name, bounding box, or point during inference?
+
+\textbf{RQ5:} What is the impact of simplifying the pipeline on the final obstruction-detection task?
+
+\subsection{Hypotheses}
+
+We initially consider the following hypotheses:
+
+\textbf{H1:} A replication of the ViDDAR pipeline using publicly available models should achieve performance reasonably close to, although not necessarily identical to, the results reported in the original work.
+
+\textbf{H2:} Removing semantic-recognition errors by providing the correct key-object name should improve localization and segmentation quality.
+
+\textbf{H3:} Providing oracle spatial localization through a ground-truth bounding box should produce substantially better segmentation performance than an approach without explicit localization guidance.
+
+\textbf{H4:} A prompt-free adaptation of SAM can learn an association between the scene and its key object, but is expected to perform worse than SAM conditioned on explicit localization information.
+
+\textbf{H5:} A reduction in segmentation quality does not necessarily imply a proportional reduction in obstruction-detection performance, since the final decision primarily depends on the overlap between the key-object region and the virtual content.
+
+
+% ============================================================
+% III. STATE OF THE ART
+% ============================================================
+
+\section{State of the Art and Related Work}
+
+\subsection{ViDDAR}
+
+ViDDAR~\cite{viddar} investigates the detection of virtual content that may be detrimental to task execution in AR environments. Among the considered scenarios is the obstruction of task-relevant physical objects by augmented content.
+
+For this problem, ViDDAR employs a pipeline composed of semantic identification, localization, and segmentation. Vision-language models identify the object relevant to the task, Grounding DINO localizes it, and SAM generates a segmentation mask used to measure the overlap between the object and virtual content.
+
+ViDDAR constitutes the main baseline of this investigation because it directly addresses AR obstruction detection and provides data that enable the experimental replication of different stages of the pipeline.
+
+\subsection{Segment Anything Model}
+
+The Segment Anything Model (SAM)~\cite{sam} is a foundation model for image segmentation designed to generate masks from different types of prompts, including points and bounding boxes.
+
+Its generalization capabilities allow it to be used as a segmentation component across different domains. However, in its original formulation, SAM does not semantically determine which object in a scene should be considered relevant to a specific task. Instead, this information is implicitly supplied through the prompt.
+
+This characteristic is particularly important in our investigation because we study what happens when explicit localization guidance is removed.
+
+\subsection{Grounding DINO}
+
+Grounding DINO~\cite{groundingdino} is an open-set object detector capable of localizing objects using textual queries. This property allows it to connect the textual output of a VLM to an image-segmentation model.
+
+Within the ViDDAR pipeline, this stage acts as a bridge between semantic recognition and segmentation: the VLM determines which object should be searched for, Grounding DINO estimates its bounding box, and SAM refines this localization into a segmentation mask.
+
+\subsection{Parameter-Efficient Adaptation of SAM}
+
+Several studies investigate methods for adapting SAM to domain-specific segmentation tasks. SAMed~\cite{samed}, for example, explores LoRA-based adaptation of SAM for medical image segmentation.
+
+LoRA~\cite{lora} enables the adaptation of large models by introducing trainable low-rank matrices into selected model components, reducing the number of trainable parameters compared with full fine-tuning.
+
+MedSAM~\cite{medsam} follows a different strategy. Instead of modifying the image encoder, it freezes both the image encoder and the prompt encoder and fine-tunes only the mask decoder, keeping an explicit bounding-box prompt at inference.
+
+\subsection{Positioning of This Work}
+
+Taken together, SAMed and MedSAM represent two ends of a design spectrum for adapting SAM: the former removes explicit prompting entirely, asking the model to jointly infer location and segmentation from the scene alone, while the latter preserves prompting and narrows the adaptation to decoding quality. The two configurations investigated in this work, a prompt-free adaptation (Option A) and a box-conditioned adaptation (Option B), can be read as an empirical comparison along this same spectrum, situated specifically within the ViDDAR obstruction-detection task rather than the medical-imaging domain in which both SAMed and MedSAM were originally proposed.
+
+
+
+% ============================================================
+% IV. METHODOLOGY
+% ============================================================
+
+\section{Methodology}
+
+The methodology comprises four parts: replication of the reference pipeline, diagnostic experiments with different levels of auxiliary guidance, two adaptations of SAM (Options A and B), and the obstruction-evaluation protocol. Fig.~\ref{fig:architecture} gives an overview of the investigated approaches.
+
+\subsection{Reference Pipeline}\label{sec:ref}
+
+The replicated pipeline follows the general structure proposed by ViDDAR:
+
+\begin{equation*}
+\resizebox{\columnwidth}{!}{$
+\text{Image} \rightarrow \text{VLM} \rightarrow
+\text{Object Name} \rightarrow \text{Grounding DINO} \rightarrow
+\text{Box} \rightarrow \text{SAM} \rightarrow \text{Mask}
+$}
+\end{equation*}
+
+The VLM identifies the object considered relevant to the task. The generated object name is used as a textual query by Grounding DINO, which estimates its bounding box. This box is then supplied to SAM to generate the final mask.
+
+For obstruction detection, let $M_k$ denote the key-object mask and $M_c$ denote the virtual-content mask. The obstruction ratio is defined as
+
+\begin{equation}
+r =
+\frac{|M_k \cap M_c|}
+{|M_k|}.
+\end{equation}
+
+Following the original work, we use $\alpha=0.25$ as the obstruction threshold:
+
+\begin{equation}
+\text{obstructed} =
+\begin{cases}
+1, & r \geq 0.25,\\
+0, & r < 0.25.
+\end{cases}
+\end{equation}
+
+
+\subsection{Oracle Object-Knowledge Configuration}
+
+To separate errors introduced by semantic recognition from errors related to localization and segmentation, we evaluate a configuration referred to as \textit{Prior Knowledge}:
+
+\begin{equation*}
+\text{GT Object Name} \rightarrow
+\text{Grounding DINO} \rightarrow
+\text{Box} \rightarrow
+\text{SAM}.
+\end{equation*}
+
+In this configuration, the correct key-object name obtained from the ground truth is provided directly to Grounding DINO.
+
+This configuration assumes oracle knowledge of the key object and therefore does not represent an operational scenario. It is used exclusively as a diagnostic upper-bound configuration to estimate the impact of errors introduced by semantic recognition.
+
+
+\subsection{Oracle Localization Configuration}
+
+To separately analyze the effect of spatial localization, we also evaluate SAM using bounding boxes directly derived from the ground-truth masks:
+
+\begin{equation*}
+\text{Image} + \text{GT Box} \rightarrow
+\text{SAM} \rightarrow
+\text{Mask}.
+\end{equation*}
+
+This configuration, referred to as \textit{SAM + GT Box (Oracle)}, represents an ideal localization condition and allows us to estimate segmentation performance when the target object's location is known.
+
+
+\subsection{Option A: Prompt-Free Adaptation}
+Following SAMed~\cite{samed}, we freeze the SAM ViT-B image encoder and insert LoRA~\cite{lora} matrices (rank 4) into the query and value projections of its attention blocks, adding about 147K trainable parameters. The prompt encoder and the mask decoder (about 4M parameters) are also fine-tuned, and the decoder outputs two classes (background and key object):
+\begin{equation*}
+\text{Image} \rightarrow \text{SAM ViT-B + LoRA} \rightarrow \text{Mask}.
+\end{equation*}
+No object name, box, or point is given at inference: the prompt encoder only supplies its default ``no prompt'' embeddings, so the model must learn both which region is relevant and how to segment it.
+
+\subsection{Option B: Box-Conditioned Decoder Fine-Tuning}
+Following MedSAM~\cite{medsam}, we keep the original SAM (ViT-B) interface, including the prompt encoder, and supply the Grounding DINO box as prompt, obtained by querying the detector with the ground-truth object name (oracle semantic guidance), as in the Prior Knowledge configuration:
+\begin{equation*}
+\text{Image} + \text{DINO Box} \rightarrow \text{SAM (frozen encoders, trained decoder)} \rightarrow \text{Mask}.
+\end{equation*}
+The image encoder and prompt encoder are frozen and only the mask decoder (about 4M parameters) is trained with a Dice+BCE loss. This was implemented from scratch, since SAMed does not support box prompts by design.
+
+\subsection{Reference Configurations}
+We additionally report SAM zero-shot with the DINO box (no adaptation) and SAM zero-shot with an oracle box derived from the ground-truth mask. The latter is an \emph{oracle-box reference} for box-prompted segmentation rather than a strict ceiling: a tight box around the annotated mask is not always the best prompt, and a fine-tuned decoder can exceed it on individual classes.
+
+\subsection{Obstruction Evaluation Protocol}
+Obstruction is computed as in Section~\ref{sec:ref} with $\alpha=0.25$. The key-object mask comes from one of three sources (ground truth, Option A, Option B). The AR-content mask is estimated by pixel difference between raw and AR images for all images, since ground-truth AR-content masks were not available. We report two settings: (i) \emph{fixed} thresholds, with the ratio threshold $\alpha=0.25$ taken from ViDDAR and a pixel-difference threshold of 30 chosen by us, since ViDDAR does not estimate the AR content this way; and (ii) \emph{tuned} thresholds, selected by grid search on validation (diff $\in[10,50]$, ratio $\in[0.05,0.95]$) maximizing F1, with accuracy as tiebreaker. Neither setting is directly comparable to the original paper, because the AR-content mask is estimated differently; tuned results only indicate attainable performance.
+
+\subsection{Run-to-Run Variance Protocol}
+Re-training SAMed with a fixed seed produced results differing by a few IoU points. Forcing single-process data loading (\texttt{num\_workers=0} instead of 8) removed one source of non-determinism, but runs with the same seed still differ, which we attribute to non-deterministic GPU kernels. We therefore treat each Option A configuration as a random variable: each was trained three times, and configurations are compared through their means with a Welch t-test~\cite{welch} rather than through single runs.
+
+
+% ============================================================
+% FIGURE 1
+% ============================================================
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=\textwidth]{Images/architecture.png}
+    \caption{Overview of the investigated approaches. The reference pipeline (ViDDAR replication) decomposes the task into semantic recognition by a VLM, localization by Grounding DINO, and segmentation by SAM. Option A (SAMed-style) segments the key object directly from the scene image with a LoRA-adapted SAM and no prompt. Option B (MedSAM-style) keeps the Grounding DINO box as a prompt and fine-tunes only the SAM mask decoder.}
+    \label{fig:architecture}
+\end{figure*}
+
+
+\subsection{Dataset}
+
+The experiments use the obstruction-detection subset of the dataset employed by ViDDAR. The dataset contains 306 pairs of images corresponding to original and augmented scenes, distributed across 23 key-object classes.
+
+Each instance contains one annotated key object. The dataset includes 161 images classified as non-obstructed and 145 images classified as obstructed.
+
+For the SAM adaptation experiment, the data were split in a class-stratified manner into 70\% training, 15\% validation, and 15\% test subsets, corresponding to 207, 37, and 62 images, respectively.
+
+This split primarily evaluates \textit{in-distribution} generalization: different instances of the same key-object classes may occur across training, validation, and test subsets. Consequently, the results of the prompt-free adaptation should not be interpreted as evidence of generalization to object categories that were not observed during training.
+
+A \textit{leave-classes-out} evaluation, in which selected classes are reserved exclusively for testing, is considered as a future experiment.
+
+The key-object masks are used as ground truth. Because the available collection of AR-content masks did not provide complete correspondence with all 306 images used in our experiments, we estimate the virtual-content mask by computing the difference between the original and augmented images. Pixels whose difference exceeds a threshold of 30 are considered part of the virtual content.
+
+On average, the key object occupies approximately 3.2\% of the image pixels. In the training set, 27 of the 207 images contain key objects occupying less than 0.5\% of the image, indicating a strong spatial imbalance between the target object and the background.
+
+
+\subsection{Evaluation Metrics}
+
+Segmentation quality is evaluated using Intersection over Union (IoU) and Dice.
+
+IoU is defined as
+
+\begin{equation}
+IoU =
+\frac{|P \cap G|}
+{|P \cup G|},
+\end{equation}
+
+while Dice is defined as
+
+\begin{equation}
+Dice =
+\frac{2|P \cap G|}
+{|P| + |G|},
+\end{equation}
+
+where $P$ denotes the predicted mask and $G$ denotes the ground-truth mask.
+
+Object recognition by the VLM is evaluated using accuracy.
+
+For obstruction detection we report accuracy, which allows direct comparison with the original work, together with precision, recall, F1-score, and False Negative Rate (FNR). We emphasize FNR because a false negative is a real obstruction incorrectly classified as safe.
+
+On the test set we report 95\% confidence intervals obtained by bootstrapping per-image IoU (10{,}000 resamples)~\cite{bootstrap}, and paired differences between methods by bootstrapping per-image IoU differences.
+
+
+\subsection{Implementation Details}
+
+SAM ViT-B is initialized from the official \texttt{sam\_vit\_b\_01ec64.pth} checkpoint. For Grounding DINO we use the \texttt{IDEA-Research/grounding-dino-tiny} checkpoint available through the Transformers library, with \texttt{box\_threshold=0.35} and \texttt{text\_threshold=0.25}; when several boxes are returned, the one with the highest confidence is kept. ViDDAR uses Grounding DINO 1.5~\cite{groundingdino15}, so our results constitute an experimental replication of the pipeline rather than an exact reproduction of the original environment.
+
+The VLM is LLaVA-NeXT~\cite{llavanext} (\texttt{llava-hf/llama3-llava-next-8b-hf}), run with 4-bit NF4 quantization because of the memory limits of the NVIDIA T4 GPU. VLM names are compared with the ground-truth names using normalization based on word intersection, since the original procedure is not fully specified.
+
+Option A uses LoRA rank 4, $224\times224$ inputs, batch size 4, learning rate $0.001$, 80 epochs, and 400 warm-up iterations. The SAMed defaults (learning rate $0.005$, shorter warm-up) caused numerical collapse (loss above 100, background-only predictions) and were adjusted using the validation set. Among the three runs with \texttt{dice\_param}$=0.8$, the model used in all subsequent evaluations is the first run; this choice was fixed before the final test evaluation. Option B uses AdamW with learning rate $10^{-5}$, 40 epochs, one image per step, input resized to 1024 pixels on the longest side (SAM's native resolution), and Dice+BCE loss, with the checkpoint (epoch 26) selected by validation IoU every two epochs; the zero-shot decoder also competes for selection. Training boxes come from Grounding DINO with the ground-truth object name (202 of the 207 training images received a box). The split (207/37/62, stratified by class) is stored in \texttt{splits.json} and was never regenerated, so all methods use exactly the same images.
+
+
+% ============================================================
+% V. RESULTS AND DISCUSSION
+% ============================================================
+
+\section{Results and Discussion}
+
+\subsection{Reference Pipeline Replication}
+
+Table~\ref{tab:baseline} presents the initial replication results and the corresponding values reported by ViDDAR.
+
+\begin{table}[t]
+\centering
+\caption{Reference pipeline replication and values reported by ViDDAR. All values are computed over the full dataset (306 images) and are therefore not directly comparable with the validation/test values of Table~\ref{tab:seg}.}
+\label{tab:baseline}
+\resizebox{\columnwidth}{!}{
+\begin{tabular}{lccc}
+\toprule
+\textbf{Configuration}
+& \textbf{Recognition}
+& \textbf{mIoU}
+& \textbf{Obstruction}
+\\
+\midrule
+
+ViDDAR + GPT-4o (paper)
+& 91.83\%
+& 72.15\%
+& 92.15\%
+\\
+
+ViDDAR + LLaVA-NeXT (paper)
+& 85.95\%
+& 71.85\%
+& 89.21\%
+\\
+
+Prior Knowledge (paper)
+& 100.00\%
+& 78.83\%
+& 93.14\%
+\\
+
+Prior Knowledge (ours)
+& 100.00\%
+& 83.88\%
+& --
+\\
+
+LLaVA + DINO + SAM (ours)
+& 74.18\%
+& 69.41\%
+& 84.97\%
+\\
+
+\bottomrule
+\end{tabular}
+}
+\end{table}
+
+The LLaVA-NeXT + Grounding DINO + SAM replication achieved 69.41\% mIoU, a difference of 2.44 percentage points from the 71.85\% reported for LLaVA-NeXT in ViDDAR.
+
+For final obstruction detection, our pipeline achieved 84.97\% accuracy, compared with 89.21\% reported in the original work.
+
+These differences should be interpreted in light of the fact that our experimental environment is not identical to the original one. In particular, we use Grounding DINO Tiny instead of Grounding DINO 1.5, 4-bit quantization for LLaVA-NeXT, and an independently implemented textual-normalization procedure.
+
+Nevertheless, the results indicate that the general behavior of the pipeline can be reproduced and provide a baseline for subsequent experiments.
+
+\subsection{Semantic Recognition}
+
+LLaVA-NeXT achieved 74.18\% accuracy in identifying the key object, compared with 85.95\% reported by ViDDAR.
+
+A total of 79 errors were observed across the 306 images. These errors were concentrated in classes including \textit{boiling pot}, \textit{electrical pot}, \textit{rules board}, \textit{electrical outlet}, and \textit{vehicle}.
+
+A recurring example involved objects annotated as \textit{boiling pot} being identified as \textit{black stove} or \textit{red hot stove}. This behavior illustrates that the task depends not only on visual object presence but also on contextual interpretation regarding which element should be considered relevant to the task.
+
+Furthermore, the exact criterion used by ViDDAR to normalize and compare textual VLM responses is not fully specified, which may also contribute to the observed performance difference.
+
+
+\subsection{Diagnostic Analysis of Auxiliary Guidance}
+
+The \textit{Prior Knowledge} configuration, in which the correct object name is provided to Grounding DINO, achieved 83.88\% mIoU.
+
+This value is numerically higher than the 78.83\% reported by ViDDAR for its corresponding configuration. However, because different Grounding DINO versions are used, this result should not be interpreted as an improvement over the published method.
+
+Its primary value is diagnostic: removing semantic-recognition errors substantially increases localization and segmentation performance relative to the 69.41\% obtained by the complete replicated pipeline.
+
+Grounding DINO failed to detect the target object in 5 of the 306 images under this configuration, corresponding to 1.63\% of the dataset. Reducing the detection threshold to 0.15 did not adequately recover these instances.
+
+
+\subsection{Segmentation Across the Guidance Spectrum}
+
+Table~\ref{tab:seg} compares the two adaptations against zero-shot SAM with the DINO box and with the oracle box on the fixed split.
+
+\begin{table}[t]
+\centering
+\caption{Key-object segmentation (IoU and Dice in \%). Validation: 37 images; test: 61 images, with 95\% bootstrap confidence intervals. DINO boxes come from Grounding DINO prompted with the ground-truth object name. Option A validation is the original-resolution evaluation of the chosen run.}
+\label{tab:seg}
+\resizebox{\columnwidth}{!}{
+\begin{tabular}{llccc}
+\toprule
+\textbf{Method} & \textbf{Guidance} & \textbf{Val IoU} & \textbf{Test IoU [95\% CI]} & \textbf{Test Dice} \\
+\midrule
+Option A & none & 59.85 & 68.63 [62.77, 73.92] & 78.74 \\
+SAM zero-shot & DINO box & 86.25 & 86.86 [81.61, 91.45] & 91.14 \\
+Option B & DINO box & 88.44 & 88.55 [84.59, 91.47] & 93.00 \\
+SAM zero-shot & oracle box & 88.58 & 89.45 [85.76, 92.58] & 93.77 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+Option B reaches 88.55\% test IoU, 0.9 pp below the oracle-box reference (89.45\%), and generalizes from validation without loss (88.44\% to 88.55\%). The paired difference between Options B and A is $+19.9$ pp (95\% bootstrap CI $[+13.9, +25.9]$), so removing guidance clearly hurts. The gain is concentrated in supplying a box at all: zero-shot SAM with a DINO box already reaches 86.86\%, i.e.\ 18.2 pp above Option A; improving the box from DINO to oracle adds a further 2.6 pp; and decoder fine-tuning recovers 1.7 pp of that. This last gain over zero-shot SAM with the same box is, however, not distinguishable from zero on our test set (95\% CI $[-1.1, +4.9]$ pp), although it was 2.2 pp on validation, where the checkpoint was selected. The validation curve is flat after the second epoch (86.25\% zero-shot, 87.35\% at epoch 2, 88.44\% at the selected epoch 26), so the selected checkpoint is only marginally better than early ones. Option A's test IoU is higher than its validation IoU (68.63\% versus 59.85\%); we suspect this reflects the composition of the small splits. These results support H3 and H4.
+
+Part of the gap between Options A and B may also come from input resolution: Option A sees $224\times224$ inputs, whereas Option B and zero-shot SAM see 1024 pixels on the longest side. Since the key object occupies on average only 3.2\% of the image, small objects can shrink to a few pixels at $224\times224$, so the 19.9 pp difference may overstate the effect of guidance alone.
+
+\subsection{Run-to-Run Variance}
+
+Table~\ref{tab:var} and Fig.~\ref{fig:variance} summarize three repetitions per configuration with single-process data loading. Even with the same seed, runs differ by up to 5 IoU points (0.5730 to 0.6231 for \texttt{dice\_param}$=0.9$), so non-determinism remains after the data-loading fix. The difference between configurations (0.0324) is only 1.7 times the combined sample standard deviation (0.0194), and a Welch t-test does not reject equal means ($t \approx 2.0$, $p \approx 0.17$). We therefore treat the two configurations as indistinguishable and keep the SAMed default $\texttt{dice\_param}=0.8$.
+
+\begin{table}[t]
+\centering
+\caption{Option A validation IoU over three runs with the same seed (sample standard deviation, $n=3$).}
+\label{tab:var}
+\resizebox{\columnwidth}{!}{
+\begin{tabular}{lccc}
+\toprule
+\textbf{Config} & \textbf{Mean IoU} & \textbf{Std} & \textbf{Runs} \\
+\midrule
+\texttt{dice\_param}=0.8 & 0.6361 & 0.0055 & 0.6322/0.6337/0.6424 \\
+\texttt{dice\_param}=0.9 & 0.6038 & 0.0269 & 0.6152/0.6231/0.5730 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=\columnwidth]{Images/VarianceFigure.png}
+    \caption{Option A validation IoU per run, mean $\pm$ sample standard deviation, and the noise band ($\pm1.5\times$ the combined deviation), for \texttt{dice\_param} 0.8 and 0.9.}
+    \label{fig:variance}
+\end{figure}
+
+\subsection{Obstruction Detection}
+
+\begin{table}[t]
+\centering
+\caption{Obstruction detection on the test set (61 images, 27 obstructed). Fixed = ratio threshold 0.25 (as in ViDDAR) and pixel-difference threshold 30 (ours); tuned = (pixel difference, ratio) selected on validation by F1. Option B boxes come from Grounding DINO prompted with the ground-truth object name. The AR-content mask is always estimated by pixel difference.}
+\label{tab:obs}
+\resizebox{\columnwidth}{!}{
+\begin{tabular}{llccccc}
+\toprule
+\textbf{Key mask} & \textbf{Thresholds} & \textbf{Acc.} & \textbf{Prec.} & \textbf{Rec.} & \textbf{F1} & \textbf{FNR} \\
+\midrule
+Ground truth & fixed & 91.80\% & 1.000 & 0.815 & 0.898 & 0.185 \\
+Option A & fixed & 90.16\% & 0.957 & 0.815 & 0.880 & 0.185 \\
+Option B & fixed & 91.80\% & 1.000 & 0.815 & 0.898 & 0.185 \\
+\midrule
+Ground truth & tuned (10, 0.20) & 100.00\% & 1.000 & 1.000 & 1.000 & 0.000 \\
+Option A & tuned (40, 0.10) & 85.25\% & 0.781 & 0.926 & 0.848 & 0.074 \\
+Option B & tuned (10, 0.15) & 96.72\% & 0.931 & 1.000 & 0.964 & 0.000 \\
+\bottomrule
+\end{tabular}}
+\end{table}
+
+Table~\ref{tab:obs} reports obstruction detection on the test set. With fixed thresholds, ground-truth masks and Option B reach the same accuracy (91.80\%), and Option A is only 1.6 pp lower (90.16\%), despite its much lower segmentation IoU. All three have the same FNR (0.185, five missed obstructions), so the bottleneck is the thresholds and the AR-content mask estimated by pixel difference, not the key-object mask. With thresholds tuned on validation, Option B reaches 96.72\% accuracy with no false negatives, whereas Option A, tuned for F1, lowers its FNR to 0.074 (it misses \texttt{help-station\_013} and \texttt{scissors\_017}) at the cost of seven false positives, and its accuracy drops to 85.25\%. Ground-truth masks with tuned thresholds reach 100\%, so the decision rule itself is sound and the remaining errors come from the masks. Thresholds were tuned on only 37 validation images, which partly fits noise: tuning helps Option B (F1 from 0.898 to 0.964) but hurts Option A (F1 from 0.880 to 0.848). Note that the Option B boxes use the ground-truth object name, so these results are not comparable to the full ViDDAR pipeline, which uses names predicted by the VLM.
+
+\subsection{Per-Class Behavior}
+
+Per-class test IoU (one to five images per class) suggests that decoder fine-tuning helps mostly where the generic SAM mask differs from the annotation. For \emph{scissors}, zero-shot SAM with the \emph{oracle} box reaches only 0.609, so localization is not the problem, whereas Option B reaches 0.802; for \emph{boiling pot} and \emph{electrical pot} Option B also improves over zero-shot SAM with the same box (0.852 and 0.968 versus 0.686 and 0.849). Conversely, Option B is slightly worse than zero-shot SAM on classes that are already well segmented, such as \emph{parking sign} (0.896 versus 0.976), \emph{stop sign} (0.928 versus 0.977) and \emph{warning sign} (0.888 versus 0.954), which is consistent with a small and uneven average gain (+1.7 pp). \emph{Electrical outlet} is hard for all methods: the oracle box reaches 0.903 but the DINO box only 0.612 (Option B: 0.683), so there the detector, not the mask decoder, is the bottleneck. The oracle box is not a strict upper bound per class: Option B exceeds it on \emph{boiling pot} (0.852 versus 0.787), \emph{scissors} (0.802 versus 0.609) and \emph{traffic light} (0.610 versus 0.323), and even zero-shot SAM with the DINO box exceeds it on \emph{ceiling fan} (0.916 versus 0.792). A tight box around the annotated mask is therefore not always the best prompt, and fine-tuning partly teaches the decoder the annotation style. Option A is weakest on classes such as \emph{parking sign} (0.491), \emph{exit sign} (0.500), \emph{scissors} (0.530) and \emph{fire hydrant} (0.541). These values are exploratory given the small counts.
+
+\subsection{Qualitative Analysis}
+
+Fig.~\ref{fig:failure} shows a failure case of the prompt-free adaptation on the validation set, \texttt{fire-extinguisher\_006}, where the selected Option A model obtains IoU $=0$. The error map shows no overlap between the predicted region and the ground truth: the model segments a different object in the scene (78{,}768 predicted pixels versus 15{,}388 ground-truth pixels). On the test set the same pattern appears in \texttt{fire-extinguisher\_002}, where Option A obtains IoU near zero while the box-conditioned methods succeed (zero-shot SAM 0.862, Option B 0.903). The converse also occurs: in \texttt{electrical-outlet\_025}, Option A reaches 0.873 whereas zero-shot SAM and Option B both obtain IoU near zero, indicating that the DINO box covered a different region (the oracle box gives 0.988). The two approaches thus fail differently: without guidance the model may select the wrong object, and with guidance the result inherits the detector's errors, which decoder fine-tuning does not repair. Fig.~\ref{fig:comparison} shows further qualitative examples.
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.95\textwidth]{Images/fireextinguisherqualitative.png}
+    \caption{Failure case of the prompt-free adaptation (Option A) on \texttt{fire-extinguisher\_006}: raw image, ground-truth mask, prediction, and error map. The prediction has zero overlap with the ground truth (IoU $=0.0000$, Dice $=0.0000$): it covers 78{,}768 pixels, about five times the 15{,}388 pixels of the ground-truth object, and corresponds to a different object in the scene.}
+    \label{fig:failure}
+\end{figure*}
+
+\begin{figure*}[t]
+    \centering
+    \includegraphics[width=0.98\textwidth]{Images/QualitativeComparison.png}
+    \caption{Qualitative comparison on the test set (Raw, AR, ground truth, Option A, Option B). Rows: the case with the largest gain of Option B over Option A, the worst failure of Option B relative to Option A (a wrong Grounding DINO box), and a case where both methods perform well.}
+    \label{fig:comparison}
+\end{figure*}
+
+\subsection{Hypotheses and Research Questions}
+
+H1 through H4 are supported by the results above: the replication is close to the original (H1), correct object names improve segmentation (H2), explicit localization clearly beats prompt-free segmentation (H3), and the prompt-free model learns the task but trails box-conditioned SAM (H4). For RQ4, SAM can be adapted to segment the key object from the image alone (68.63\% test IoU), but with a large gap relative to box-conditioned segmentation.
+
+H5 is partially supported: with fixed thresholds, a 20 pp drop in segmentation IoU (Option A versus B) changes obstruction accuracy by only 1.6 pp, since the AR-content estimate limits all configurations equally; with tuned thresholds, however, Option A's masks do degrade accuracy (85.25\% versus 96.72\%) and trade false negatives for false positives. For RQ5, simplifying the pipeline to Option A is therefore costly mainly when thresholds must be tuned, and the effect on safety-relevant false negatives depends on that trade-off.
+
+
+\section{Threats to Validity}
+
+First, the replication does not use the same models as ViDDAR: we use Grounding DINO Tiny instead of Grounding DINO 1.5 and run LLaVA-NeXT with 4-bit quantization. Second, VLM answers are matched to ground truth with an independently implemented word-intersection normalization. Third, the virtual-content mask is estimated by pixel difference for all images, and obstruction thresholds tuned on only 37 validation images are not comparable to the original paper. Fourth, the boxes used by Option B and by the zero-shot DINO baseline come from Grounding DINO prompted with the ground-truth object name, so their results exclude VLM recognition errors and are not comparable to the full pipeline. Fifth, the test set is small: Grounding DINO returned no box for one of its 62 images, so all methods are compared on the remaining 61, and differences of a few points, including Option A's improvement from validation to test, may reflect split composition. Sixth, Option B's checkpoint was selected on the validation set, so its validation numbers are optimistic (test numbers are not affected), and it was trained once, so its run-to-run variance was not estimated; its gain over zero-shot SAM on the test set is within bootstrap uncertainty. Seventh, Option A is trained and evaluated at $224\times224$, while Option B and zero-shot SAM operate at SAM's native 1024-pixel resolution, so the comparison between the two adaptations confounds guidance with input resolution. Eighth, Option A training is not fully deterministic even with a fixed seed, so a single run of it may differ by a few IoU points from the reported one. Ninth, the test split was evaluated more than once, because an implementation error in the Option B training targets was found and fixed after a first evaluation; no hyperparameter was changed based on test results. Finally, the class-stratified split measures generalization to unseen instances of known classes, not to unseen classes.
+
+
+\section{Future Work}
+
+Planned next steps are a leave-classes-out evaluation, a formal latency measurement of the full pipeline versus Options A and B, and a sensitivity analysis of the pixel-difference threshold used to estimate the virtual-content mask. SAM-Adapter~\cite{samadapter} was attempted but blocked by \texttt{mmcv}/CUDA incompatibilities and remains open. Evaluating Option B with boxes obtained from VLM-predicted names, instead of ground-truth names, would separate the value of spatial guidance from that of semantic guidance. Training Option A at a higher resolution (e.g., the $512\times512$ used by SAMed) would remove the resolution confound in the A versus B comparison, and repeating Option B training with several seeds would estimate its run-to-run variance.
+
+
+\section{Conclusion}
+
+We replicated the ViDDAR obstruction-detection pipeline (69.41\% mIoU and 84.97\% accuracy, versus 71.85\% and 89.21\% in the original work) and compared two adaptations of SAM. Box-conditioned decoder fine-tuning (Option B), with boxes obtained from the ground-truth object name, reaches 88.55\% IoU on the test set, 0.9 pp below SAM prompted with an oracle box, and 96.72\% obstruction accuracy with no false negatives when thresholds are tuned on validation. The prompt-free adaptation (Option A) reaches 68.63\% IoU; with fixed thresholds its obstruction accuracy is only 1.6 pp lower (90.16\% versus 91.80\%), but with tuned thresholds it falls to 85.25\%. Guidance from the object name, converted into a box, is thus the most valuable form of guidance for segmentation quality, while semantic identification by the VLM is the main source of replication error. Most of the segmentation gain comes from supplying a box at all; decoder fine-tuning adds a further 1.7 pp that is not statistically significant on our test set. We also showed that run-to-run variance in prompt-free training is large enough to hide small hyperparameter effects and persists after removing non-deterministic data loading, so hyperparameter comparisons should rely on repeated runs.
+
+
+% ============================================================
+% REFERENCES
+% ============================================================
+
+\begin{thebibliography}{00}
+
+\bibitem{viddar}
+Y. Xiu, T. Scargill, and M. Gorlatova,
+``ViDDAR: Vision Language Model-Based Task-Detrimental Content Detection for Augmented Reality,''
+\emph{IEEE Transactions on Visualization and Computer Graphics},
+vol. 31, no. 5, pp. 3194--3203, May 2025,
+doi: 10.1109/TVCG.2025.3549147.
+
+\bibitem{sam}
+A. Kirillov, E. Mintun, N. Ravi, H. Mao, C. Rolland,
+L. Gustafson, T. Xiao, S. Whitehead, A. C. Berg,
+W.-Y. Lo, P. Dollár, and R. Girshick,
+``Segment Anything,''
+in \emph{Proc. IEEE/CVF International Conference on Computer Vision (ICCV)},
+2023, pp. 4015--4026.
+
+\bibitem{groundingdino}
+S. Liu, Z. Zeng, Z. Ren, F. Li, H. Zhang, J. Yang,
+Q. Jiang, C. Li, J. Yang, H. Su, J. Zhu, and L. Zhang,
+``Grounding DINO: Marrying DINO with Grounded Pre-Training for
+Open-Set Object Detection,''
+in \emph{Computer Vision -- ECCV 2024},
+2024, pp. 38--55,
+doi: 10.1007/978-3-031-72970-6\_3.
+
+\bibitem{samed}
+K. Zhang and D. Liu,
+``Customized Segment Anything Model for Medical Image Segmentation,''
+arXiv preprint arXiv:2304.13785, 2023.
+
+\bibitem{lora}
+E. J. Hu, Y. Shen, P. Wallis, Z. Allen-Zhu, Y. Li,
+S. Wang, L. Wang, and W. Chen,
+``LoRA: Low-Rank Adaptation of Large Language Models,''
+in \emph{Proc. International Conference on Learning Representations (ICLR)},
+2022.
+
+\bibitem{medsam}
+J. Ma, Y. He, F. Li, L. Han, C. You, and B. Wang,
+``Segment Anything in Medical Images,''
+\emph{Nature Communications}, vol. 15, no. 1, p. 654, 2024,
+doi: 10.1038/s41467-024-44824-z.
+
+\bibitem{groundingdino15}
+T. Ren, Q. Jiang, S. Liu, Z. Zeng, W. Liu, H. Gao, H. Huang, Z. Ma, X. Jiang, Y. Chen, Y. Xiong, H. Zhang, F. Li, P. Tang, K. Yu, and L. Zhang,
+``Grounding DINO 1.5: Advance the `Edge' of Open-Set Object Detection,''
+arXiv preprint arXiv:2405.10300, 2024.
+
+\bibitem{llavanext}
+H. Liu, C. Li, Y. Li, B. Li, Y. Zhang, S. Shen, and Y. J. Lee,
+``LLaVA-NeXT: Improved reasoning, OCR, and world knowledge,''
+Jan. 2024. [Online]. Available: \url{https://llava-vl.github.io/blog/2024-01-30-llava-next/}
+
+\bibitem{samadapter}
+T. Chen, L. Zhu, C. Ding, R. Cao, Y. Wang, Z. Li, L. Sun, P. Mao, and Y. Zang,
+``SAM Fails to Segment Anything? -- SAM-Adapter: Adapting SAM in Underperformed Scenes: Camouflage, Shadow, Medical Image Segmentation, and More,''
+arXiv preprint arXiv:2304.09148, 2023.
+
+\bibitem{bootstrap}
+B. Efron and R. J. Tibshirani,
+\emph{An Introduction to the Bootstrap}.
+New York, NY, USA: Chapman \& Hall, 1993.
+
+\bibitem{welch}
+B. L. Welch,
+``The generalization of `Student's' problem when several different population variances are involved,''
+\emph{Biometrika}, vol. 34, no. 1--2, pp. 28--35, 1947.
+
+\end{thebibliography}
+
+\end{document}
