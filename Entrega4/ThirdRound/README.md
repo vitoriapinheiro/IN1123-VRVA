@@ -1,7 +1,5 @@
-# Entrega 4 — ThirdRound
+# Third round
 
-| File | Description |
-|------|-------------|
-| `Project_vrva.tex` | Paper (IEEE conference format) |
+[`Project_vrva.tex`](Project_vrva.tex) is the current paper (IEEE conference format).
 
-Cross-dataset comparison notebook: see [`../../FinalDelivery/`](../../FinalDelivery/).
+The replication notebook and the round history are in [`../README.md`](../README.md). The COCO comparison, the demos, and the saved numbers are in [`../../FinalDelivery/README.md`](../../FinalDelivery/README.md).
